@@ -2,11 +2,15 @@
 
 extern crate bincode;
 extern crate common;
+extern crate encoding_rs;
 
+use common::remote_control::*;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use std::thread::JoinHandle;
 
 fn main() {
     let listener = TcpListener::bind("0.0.0.0:1234").expect("OMG! couldn't bind!");
@@ -25,53 +29,74 @@ fn main() {
     }
 }
 
-struct MyError {
-    msg: String,
-}
-
-impl From<std::io::Error> for MyError {
-    fn from(e: std::io::Error) -> Self {
-        MyError { msg: e.to_string() }
-    }
-}
-
-impl From<bincode::Error> for MyError {
-    fn from(e: bincode::Error) -> Self {
-        MyError { msg: e.to_string() }
-    }
-}
-
 fn handler(mut stream: TcpStream) -> Result<(), MyError> {
-    use common::remote_control::*;
     let mut buf = [0; 1024];
     stream.read(&mut buf)?;
     let msg: MessageType = bincode::deserialize(&buf[..])?;
-
+    
+    let msg = process_msg(msg);
     let msg = match msg {
-        MessageType::SimpleMessage(s) => format!("Echo : {}", s),
-        MessageType::RunCommand(cmd) => {
-            let output = if cfg!(target_os = "windows") {
-                Command::new("cmd")
-                    .arg("/C")
-                    .arg(OsStr::new(&cmd))
-                    .output()?
-            } else {
-                Command::new("sh").arg("-c").arg("echo hello").output()?
-            };
-
-            format!(
-                "stdout:\n{}\nstderr\n{}",
-                String::from_utf8(output.stdout)
-                    .unwrap_or("could'nt convert stdout to string!".to_string()),
-                String::from_utf8(output.stderr)
-                    .unwrap_or("couldn't convert stderr to string!".to_string())
-            )
-        }
-        MessageType::End => "Good Bye".to_string(),
+        Err(e) => format!("Error while processing : {}", e.msg),
+        Ok(e) => e,
     };
-
-    let msg = bincode::serialize(&msg)?;
-    stream.write_all(&msg)?;
+    
+    stream.write_all((&msg[..]).as_bytes())?;
     stream.flush()?;
     Ok(())
+}
+
+fn process_msg(msg: MessageType) -> Result<String, MyError> {
+    let msg = match msg {
+        MessageType::Echo(s) => format!("Echo : {}", s),
+        MessageType::RunCommand {
+            command: cmd,
+            is_waiting,
+        } => {
+            let mut command = if cfg!(target_os = "windows") {
+                let mut c = Command::new("cmd");
+                c.arg("/C").arg(OsStr::new(&cmd));
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.arg("-c").arg("echo hello");
+                c
+            };
+            
+            if is_waiting {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let _thread: JoinHandle<Result<(), MyError>> = std::thread::spawn(move || {
+                    let output = command.output()?;
+                    let s = format!(
+                        "stdout :\n{}\nstderr:\n{}\n",
+                        encoding_rs::SHIFT_JIS
+                            .decode(&output.stdout)
+                            .0
+                            .to_string()
+                            .trim()
+                            .trim_end(),
+                        encoding_rs::SHIFT_JIS
+                            .decode(&output.stderr)
+                            .0
+                            .to_string()
+                            .trim()
+                            .trim_end()
+                    );
+                    sender.send(s)?;
+                    Ok(())
+                });
+                receiver.recv_timeout(std::time::Duration::new(3, 0))?
+            } else {
+                "Ran the command but I don't know if it's ok".to_string()
+            }
+        }
+        MessageType::End => "Good Bye".to_string(),
+        MessageType::SendFile { filename, contents } => {
+            let mut f = File::create(&filename)?;
+            f.write_all(&contents[..].as_bytes())?;
+            f.flush()?;
+            "Created the file".to_string()
+        }
+    };
+    
+    Ok(msg)
 }

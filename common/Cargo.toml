@@ -8,3 +8,4 @@ edition = "2018"
 [dependencies]
 serde = "*"
 serde_derive = "*"
+bincode = "*"
