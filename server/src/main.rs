@@ -1,102 +1,226 @@
-#![windows_subsystem = "windows"]
-
 extern crate bincode;
 extern crate common;
-extern crate encoding_rs;
 
 use common::remote_control::*;
-use std::ffi::OsStr;
-use std::fs::File;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::Command;
-use std::thread::JoinHandle;
+use std::fs::{read_dir, File};
+use std::io::Read;
+use std::path::Path;
+use std::{fs, io};
+use ws::{Result as WResult, CloseCode};
+use ws::{listen, Handler, Message, Sender};
 
 fn main() {
-    let listener = TcpListener::bind("0.0.0.0:1234").expect("OMG! couldn't bind!");
-    for streams in listener.incoming() {
-        match streams {
-            Err(e) => eprintln!("{:?}", e),
-            Ok(stream) => {
-                std::thread::spawn(move || {
-                    let res = handler(stream);
-                    if let Err(e) = res {
-                        eprintln!("{:?}", e.msg);
-                    }
-                });
+    let configfile_path: &Path = Path::new("ip.config");
+    let config = MyConfig::from_configfile(configfile_path).unwrap_or_else(|e| {
+        log_error(e);
+        std::process::exit(-1);
+    });
+    
+    let ip = format!("{}:{}", config.ip, config.port);
+    
+    listen(ip, |out| Server { out }).unwrap();
+}
+
+struct Server {
+    out: Sender,
+}
+
+impl Handler for Server {
+    fn on_message(&mut self, msg: Message) -> WResult<()> {
+        match msg {
+            Message::Text(txt) => {
+                println!("{}", txt);
+            }
+            Message::Binary(bytes) => {
+                let msg = bincode::deserialize(&bytes).unwrap_or(MyResponse::Ok(
+                    MyResponseKind::Echo("受け取ったResponseKindの解凍に失敗しました".to_string()),
+                ));
+                process_response(msg);
+            }
+        }
+        
+        match process() {
+            None => {
+                self.out.close(CloseCode::Normal).expect("接続を切断する際にエラーが発生しました");
+                std::process::exit(0);
+            }
+            Some(mm) => {
+                let mm = bincode::serialize(&mm).unwrap_or(Default::default());
+                self.out.send(Message::Binary(mm))
             }
         }
     }
 }
 
-fn handler(mut stream: TcpStream) -> Result<(), MyError> {
-    let mut buf = [0; 1024];
-    stream.read(&mut buf)?;
-    let msg: MessageType = bincode::deserialize(&buf[..])?;
-    
-    let msg = process_msg(msg);
-    let msg = match msg {
-        Err(e) => format!("Error while processing : {}", e.msg),
-        Ok(e) => e,
-    };
-    
-    stream.write_all((&msg[..]).as_bytes())?;
-    stream.flush()?;
-    Ok(())
+fn process() -> Option<MyMessage> {
+    println!("コマンドを入力してください");
+    match parse_line() {
+        Err(e) => {
+            eprintln!("{}", e);
+            process()
+        }
+        Ok(pk) => match pk {
+            ParseKind::End => None,
+            ParseKind::Ls => process(),
+            ParseKind::Help => process(),
+            ParseKind::Echo(s) => Some(MyMessage::Echo(s)),
+            ParseKind::RunCommand {
+                command,
+                is_waiting,
+            } => Some(MyMessage::RunCommand {
+                command,
+                is_waiting,
+            }),
+            ParseKind::SendFile { filename, contents } => {
+                Some(MyMessage::SendFile { filename, contents })
+            }
+        },
+    }
 }
 
-fn process_msg(msg: MessageType) -> Result<String, MyError> {
-    let msg = match msg {
-        MessageType::Echo(s) => format!("Echo : {}", s),
-        MessageType::RunCommand {
-            command: cmd,
-            is_waiting,
-        } => {
-            let mut command = if cfg!(target_os = "windows") {
-                let mut c = Command::new("cmd");
-                c.arg("/C").arg(OsStr::new(&cmd));
-                c
+fn process_response(res: MyResponse) {
+    match res {
+        Ok(mrk) => match mrk {
+            MyResponseKind::Echo(s) => {
+                println!("{}", s);
+            }
+            MyResponseKind::RunCommand { stdout, stderr } => {
+                println!("stdout :/n{}", stdout);
+                eprintln!("stderr :\n{}", stderr);
+            }
+            MyResponseKind::SendFile => {
+                println!("ファイルを送信しました");
+            }
+        },
+        Err(me) => {
+            eprintln!("{}", me);
+        }
+    }
+}
+
+fn parse_line() -> Result<ParseKind, MyError> {
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf).map_err(|e| {
+        MyError::new(
+            e,
+            "標準入力から一行を受け取る際にエラーが発生しました".to_string(),
+        )
+    })?;
+    let mut input = buf.split_whitespace();
+    let ty = input.next().ok_or("コマンドを入力してください").map_err(|e| {
+        MyError::new(
+            e,
+            "コマンドを受け取って解析する際にエラーが発生しました".to_string(),
+        )
+    })?;
+    
+    let ty_lower = &ty.to_lowercase();
+    match ty {
+        ty if ty_lower == "simplemessage" || ty == "SM" => {
+            let mut input = input.peekable();
+            if input.peek().is_none() {
+                Err(MyError {
+                    msg: "メッセージに当たる引数がありません".to_string(),
+                    when: "SimpleMessageの引数を確認している際にエラーが発生しました".to_string(),
+                })
             } else {
-                let mut c = Command::new("sh");
-                c.arg("-c").arg("echo hello");
-                c
-            };
-            
-            if is_waiting {
-                let (sender, receiver) = std::sync::mpsc::channel();
-                let _thread: JoinHandle<Result<(), MyError>> = std::thread::spawn(move || {
-                    let output = command.output()?;
-                    let s = format!(
-                        "stdout :\n{}\nstderr:\n{}\n",
-                        encoding_rs::SHIFT_JIS
-                            .decode(&output.stdout)
-                            .0
-                            .to_string()
-                            .trim()
-                            .trim_end(),
-                        encoding_rs::SHIFT_JIS
-                            .decode(&output.stderr)
-                            .0
-                            .to_string()
-                            .trim()
-                            .trim_end()
-                    );
-                    sender.send(s)?;
-                    Ok(())
-                });
-                receiver.recv_timeout(std::time::Duration::new(3, 0))?
-            } else {
-                "Ran the command but I don't know if it's ok".to_string()
+                Ok(ParseKind::Echo(input.collect::<Vec<&str>>().join(" ")))
             }
         }
-        MessageType::End => "Good Bye".to_string(),
-        MessageType::SendFile { filename, contents } => {
-            let mut f = File::create(&filename)?;
-            f.write_all(&contents[..].as_bytes())?;
-            f.flush()?;
-            "Created the file".to_string()
+        
+        ty if ty_lower == "runcommand" || ty == "RC" => {
+            let mut input = input.peekable();
+            if input.peek().is_none() {
+                Err(MyError {
+                    msg: "コマンドに当たる引数がありません".to_string(),
+                    when: "RunCommandの引数を確認している際にエラーが発生しました".to_string(),
+                })
+            } else {
+                let is_waiting = if &input.peek().unwrap().to_lowercase() == "-w" {
+                    true
+                } else {
+                    false
+                };
+                Ok(ParseKind::RunCommand {
+                    command: input.skip(1).collect::<Vec<&str>>().join(" "),
+                    is_waiting,
+                })
+            }
         }
-    };
-    
-    Ok(msg)
+        ty if ty_lower == "end" || &ty.to_lowercase() == "exit" => {
+            if input.next().is_some() {
+                Err(MyError {
+                    msg: "引数が多すぎます".to_string(),
+                    when: "Endの引数を確認している際にエラーが発生しました".to_string(),
+                })
+            } else {
+                Ok(ParseKind::End)
+            }
+        }
+        ty if ty_lower == "sendfile" || ty == "SF" => {
+            let mut input = input.peekable();
+            if input.peek().is_none() {
+                Err(MyError {
+                    msg: "ファイルパスに当たる引数がありません".to_string(),
+                    when: "SendFileの引数を確認している際にエラーが発生しました".to_string(),
+                })
+            } else {
+                let filename = input.next().unwrap().to_string();
+                let new_filename = input.next().unwrap_or(&filename);
+                let contents = send_file(&filename)?;
+                Ok(ParseKind::SendFile {
+                    filename: new_filename.to_string(),
+                    contents,
+                })
+            }
+        }
+        ty if ty == "ls" => {
+            let f = read_dir(".\\").map_err(|e| MyError::new(
+                e,
+                "プログラムが実行されているディレクトリのファイル一覧を獲得する際にエラーが発生しました".to_string(),
+            ))?;
+            let par = fs::canonicalize(&Path::new(".\\")).map_err(|e| {
+                MyError::new(e, "絶対パスの取得の際にエラーが発生しました".to_string())
+            })?;
+            let mut s = String::new();
+            s.push_str(&format!(
+                "{}\n",
+                par.to_str().unwrap_or("絶対パスを取得できませんでした")
+            ));
+            for path in f {
+                s.push_str(&format!("{}\n", path.unwrap().path().display()))
+            }
+            println!("{}", s);
+            Ok(ParseKind::Ls)
+        }
+        _ty if ty_lower == "help" => {
+            let s = "\
+help                実行できるコマンドを確認できます
+end(exit)           プログラムを終了します
+ls                  このプログラムの動いている絶対ディレクトリとそのディレクトリのファイル一覧を表示します
+SendFile(SF)        ファイルを送信します
+SimpleMessage(SM)   メッセージを送信します
+RunCommand(RC)      コマンドを実行します
+            ";
+            println!("{}", s);
+            Ok(ParseKind::Help)
+        }
+        _ => Err(MyError {
+            msg: "間違ったコマンドです".to_string(),
+            when: "コマンドを解析している際にエラーが発生しました".to_string(),
+        }),
+    }
+}
+
+fn send_file(s: &str) -> Result<String, MyError> {
+    let path = Path::new(s);
+    let mut f = File::open(path).map_err(|e| MyError::new(e, "送るファイルを開く際にエラーが発生しました".to_string()))?;
+    let mut buf = String::new();
+    f.read_to_string(&mut buf).map_err(|e| {
+        MyError::new(
+            e,
+            "送るファイルを読み込む際にエラーが発生しました".to_string(),
+        )
+    })?;
+    Ok(buf)
 }

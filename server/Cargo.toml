@@ -10,3 +10,4 @@ common = { path = "../common" }
 serde = { version = "*", features = ["derive"] }
 bincode = "*"
 encoding_rs = "*"
+ws = "*"
