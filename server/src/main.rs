@@ -101,7 +101,7 @@ fn process_response(res: MyResponse) {
             }
         },
         Err(me) => {
-            eprintln!("{}", me);
+            eprintln!("{}\n", me);
         }
     }
 }
