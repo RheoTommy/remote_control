@@ -6,7 +6,7 @@ pub mod remote_control {
     
     use serde_derive::*;
     use std::fmt::Display;
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::io::{Read, Write};
     use std::path::Path;
     use std::fmt;
@@ -106,7 +106,7 @@ pub mod remote_control {
     pub fn log_error(me: MyError) {
         let logfile_path: &Path = Path::new("err.log");
         let mut logfile = if logfile_path.exists() {
-            File::open(logfile_path).unwrap()
+            OpenOptions::new().append(true).open(logfile_path).unwrap()
         } else {
             File::create(logfile_path).unwrap()
         };

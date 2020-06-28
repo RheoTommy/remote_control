@@ -3,14 +3,22 @@ extern crate common;
 
 use common::remote_control::*;
 use std::fs::{read_dir, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::Command;
 use std::{fs, io};
-use ws::{Result as WResult, CloseCode};
 use ws::{listen, Handler, Message, Sender};
+use ws::{CloseCode, Result as WResult};
 
 fn main() {
     let configfile_path: &Path = Path::new("ip.config");
+    if !configfile_path.exists() {
+        let res = make_ipconfig();
+        if let Err(me) = res {
+            log_error(me);
+            std::process::exit(-1);
+        }
+    }
     let config = MyConfig::from_configfile(configfile_path).unwrap_or_else(|e| {
         log_error(e);
         std::process::exit(-1);
@@ -223,4 +231,38 @@ fn send_file(s: &str) -> Result<String, MyError> {
         )
     })?;
     Ok(buf)
+}
+
+fn make_ipconfig() -> Result<(), MyError> {
+    let ip = get_ip()?;
+    let ip = format!("{} {}", ip, "1234");
+    let mut f = File::create("ip.config").map_err(|e| MyError::new(
+        e,
+        "ip.configを作成する際にエラーが発生しました".to_string(),
+    ))?;
+    f.write_all(ip.as_bytes()).map_err(|e| MyError::new(
+        e,
+        "ip.configに書き込む際にエラーが発生しました".to_string(),
+    ))?;
+    f.flush().map_err(|e| MyError::new(
+        e,
+        "ip.configに書き込む際にエラーが発生しました".to_string(),
+    ))?;
+    Ok(())
+}
+
+fn get_ip() -> Result<String, MyError> {
+    let mut command = Command::new("cmd");
+    let output = command.arg("/C").arg("ipconfig").output().map_err(|e| MyError::new(e, "Ipconfigの実行中にエラーが発生しました".to_string()))?;
+    let output = encoding_rs::SHIFT_JIS.decode(&output.stdout).0.trim().trim_end().to_string();
+    let ip = grep(&output, "IPv4");
+    let ip = ip[1].trim().trim_end().split_whitespace();
+    Ok(ip.last().ok_or_else(|| MyError::new(
+        "Ipアドレスに当たる文字列がありません".to_string(),
+        "Ipアドレスを抽出する際にエラーが発生しました".to_string(),
+    ))?.to_string())
+}
+
+fn grep<'a, 'b>(contents: &'a str, s: &'b str) -> Vec<&'a str> {
+    contents.lines().filter(|line| line.contains(s)).collect()
 }
