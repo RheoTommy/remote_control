@@ -11,10 +11,17 @@ pub mod remote_control {
     use std::path::Path;
     use std::fmt;
     
+    pub enum ProcessType {
+        NormalMessage(MyMessage),
+        End,
+        SetExecNumber(usize),
+    }
+    
     pub enum ParseKind {
         Echo(String),
-        RunCommand { command: String, is_waiting: bool },
+        RunCommand { command: String },
         SendFile { filename: String, contents: String },
+        SetExecNumber(usize),
         End,
         Ls,
         Help,
@@ -24,7 +31,7 @@ pub mod remote_control {
     #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
     pub enum MyMessage {
         Echo(String),
-        RunCommand { command: String, is_waiting: bool },
+        RunCommand { command: String, exec_number: usize },
         SendFile { filename: String, contents: String },
     }
     
@@ -68,6 +75,14 @@ pub mod remote_control {
     }
     
     impl MyConfig {
+        /// MyConfigのファイルを受け取り、中身を解析してMyConfigを返します
+        ///
+        /// # Errors
+        /// * ファイルを開けなかった際
+        /// * ファイルを読み込めなかった際
+        /// * ファイルに適切なIPアドレスとPort番号が記載されていなかったとき
+        ///
+        /// MyErrorを返します
         pub fn from_configfile(path: &Path) -> Result<Self, MyError> {
             let mut configfile = File::open(path).map_err(|e| {
                 MyError::new(
@@ -103,6 +118,15 @@ pub mod remote_control {
         }
     }
     
+    /// MyErrorを`err.log`に書き込みます
+    ///
+    /// # Panics
+    /// * `logfile_path`を開けなかった際
+    /// * `logfile_path`を作成できなかった際
+    /// * `logfile`に書き込めなかった際
+    /// * `logfile`にFlushできなかった際
+    ///
+    /// Panicします
     pub fn log_error(me: MyError) {
         let logfile_path: &Path = Path::new("err.log");
         let mut logfile = if logfile_path.exists() {
@@ -116,4 +140,7 @@ pub mod remote_control {
         logfile.write_all((&log[..]).as_ref()).unwrap();
         logfile.flush().unwrap();
     }
+    
+    /// MyConfigの設定を保存するファイルの名前です
+    pub const CONFIG_FILE: &str = "ip.ini";
 }

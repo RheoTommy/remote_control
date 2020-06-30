@@ -1,0 +1,3 @@
+MyError { msg: "指定されたファイルが見つかりません。 (os error 2)", when: "Configファイルを開く際にエラーが発生しました" }
+MyError { msg: "指定されたファイルが見つかりません。 (os error 2)", when: "Configファイルを開く際にエラーが発生しました" }
+MyError { msg: "指定されたファイルが見つかりません。 (os error 2)", when: "Configファイルを開く際にエラーが発生しました" }
