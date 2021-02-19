@@ -281,7 +281,7 @@ fn parse_line() -> Result<ParseKind, MyError> {
 }
 
 /// `Help`メッセージを返します
-fn help_string() -> &str {
+fn help_string() -> &'static str {
     "\
 help                    実行できるコマンドを確認できます
 end(exit)               プログラムを終了します

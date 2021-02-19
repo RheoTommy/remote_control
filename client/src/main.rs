@@ -15,7 +15,7 @@ use ws::{connect, Handler, Sender};
 use ws::{Handshake, Message, Result as WResult};
 
 fn main() {
-    let ip = read_config_ini();
+    let config = read_config_ini();
 
     let ip = format!("ws://{}:{}", config.ip, config.port);
 
